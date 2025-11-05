@@ -1,0 +1,17 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # tweak via environment if needed
+      - MAX_DISCOUNT=0.20
+      - K=1.0
+      - D0_M=800
+      - T0_MIN=30
+      - RADIUS_M=3000
+      - S_MIN=0.05
+      - MIN_SOLO_UNITS=6
+      - BASE_DELIVERY_FEE_CENTS=450
+      - MIN_DELIVERY_FEE_CENTS=300
