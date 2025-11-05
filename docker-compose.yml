@@ -3,7 +3,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8020:8000"
     environment:
       # tweak via environment if needed
       - MAX_DISCOUNT=0.20
