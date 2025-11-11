@@ -14,15 +14,6 @@ class CartSummaryOut(BaseModel):
     subtotalCents: int
     items: List[CartItemIn]
 
-class LocationResolveIn(BaseModel):
-    address: str
-
-class LocationOut(BaseModel):
-    locationId: str
-    lat: float
-    lon: float
-    addressText: str
-
 class SlotOut(BaseModel):
     slotId: str
     startAt: datetime
@@ -44,7 +35,8 @@ class SlotsResponse(BaseModel):
 class QuoteIn(BaseModel):
     cartId: str
     slotId: str
-    locationId: str
+    lat: float
+    lon: float
 
 class QuoteOut(BaseModel):
     quoteId: str
@@ -68,10 +60,3 @@ class MockDataIn(BaseModel):
     centerLon: float
     days: int = 1
     density: str = "medium"  # low/medium/high
-
-class SlotsQuery(BaseModel):
-    cartId: str
-    lat: float
-    lon: float
-    fromISO: Optional[str] = None
-    toISO: Optional[str] = None

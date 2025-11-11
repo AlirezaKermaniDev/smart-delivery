@@ -1,17 +1,32 @@
 version: "3.9"
 services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: smart
+      POSTGRES_PASSWORD: smart
+      POSTGRES_DB: smart
+    ports:
+      - "5433:5432"   # optional, expose DB to host
+    volumes:
+      - smart_pg:/var/lib/postgresql/data
+
   api:
     build: .
-    ports:
-      - "8020:8000"
+    depends_on:
+      - db
     environment:
-      # tweak via environment if needed
-      - MAX_DISCOUNT=0.20
-      - K=1.0
-      - D0_M=800
-      - T0_MIN=30
-      - RADIUS_M=3000
-      - S_MIN=0.05
-      - MIN_SOLO_UNITS=6
-      - BASE_DELIVERY_FEE_CENTS=450
-      - MIN_DELIVERY_FEE_CENTS=300
+      DATABASE_URL: postgresql://smart:smart@db:5432/smart
+      MAX_DISCOUNT: 0.20
+      K: 1.0
+      D0_M: 800
+      T0_MIN: 30
+      RADIUS_M: 3000
+      S_MIN: 0.05
+      MIN_SOLO_UNITS: 6
+      BASE_DELIVERY_FEE_CENTS: 450
+      MIN_DELIVERY_FEE_CENTS: 300
+    ports:
+      - "8020:8000"   # host:container
+volumes:
+  smart_pg:

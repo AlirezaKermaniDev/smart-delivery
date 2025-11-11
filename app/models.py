@@ -1,74 +1,78 @@
-from __future__ import annotations
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional, List
+from datetime import datetime, timedelta
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy import Integer, String, Float, DateTime, ForeignKey, Boolean
 
-@dataclass
-class Product:
-    id: str
-    name: str
-    price_cents: int
-    unit_factor: int = 1
-    active: bool = True
+class Base(DeclarativeBase): pass
 
-@dataclass
-class DeliverySlot:
-    id: str
-    start_at: datetime
-    end_at: datetime
-    region_id: str = "default"
-    capacity_total: int = 10
-    capacity_used: int = 0
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    price_cents: Mapped[int] = mapped_column(Integer)
+    unit_factor: Mapped[int] = mapped_column(Integer, default=1)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
 
-@dataclass
-class Location:
-    id: str
-    lat: float
-    lon: float
-    address: str
+class DeliverySlot(Base):
+    __tablename__ = "delivery_slots"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime)
+    end_at: Mapped[datetime] = mapped_column(DateTime)
+    region_id: Mapped[str] = mapped_column(String, default="default")
+    capacity_total: Mapped[int] = mapped_column(Integer, default=12)
+    capacity_used: Mapped[int] = mapped_column(Integer, default=0)
 
-@dataclass
-class CartItem:
-    product_id: str
-    qty: int
+class Cart(Base):
+    __tablename__ = "carts"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    items = relationship("CartItem", back_populates="cart", cascade="all, delete-orphan")
 
-@dataclass
-class Cart:
-    id: str
-    user_id: Optional[str]
-    items: List[CartItem] = field(default_factory=list)
+class CartItem(Base):
+    __tablename__ = "cart_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cart_id: Mapped[str] = mapped_column(ForeignKey("carts.id"))
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"))
+    qty: Mapped[int] = mapped_column(Integer)
+    cart = relationship("Cart", back_populates="items")
+    product = relationship("Product")
 
-@dataclass
-class Quote:
-    id: str
-    cart_id: str
-    slot_id: str
-    location_id: str
-    subtotal_cents: int
-    delivery_fee_cents: int
-    discount_cents: int
-    total_cents: int
-    locked_until: datetime
 
-@dataclass
-class Order:
-    id: str
-    user_id: Optional[str]
-    cart_id: str
-    location_id: str
-    slot_id: str
-    subtotal_cents: int
-    delivery_fee_cents: int
-    discount_cents: int
-    total_cents: int
-    status: str = "confirmed"
+class Quote(Base):
+    __tablename__ = "quotes"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    cart_id: Mapped[str] = mapped_column(ForeignKey("carts.id"))
+    slot_id: Mapped[str] = mapped_column(ForeignKey("delivery_slots.id"))
+    subtotal_cents: Mapped[int] = mapped_column(Integer)
+    delivery_fee_cents: Mapped[int] = mapped_column(Integer)
+    discount_cents: Mapped[int] = mapped_column(Integer)
+    total_cents: Mapped[int] = mapped_column(Integer)
+    locked_until: Mapped[datetime] = mapped_column(DateTime)
+    # NEW
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
 
-@dataclass
-class ScheduledStop:
-    id: str
-    order_id: Optional[str]
-    lat: float
-    lon: float
-    scheduled_at: datetime
-    status: str = "scheduled"
-    weight: float = 1.0  # batching weight (not physical)
+class Order(Base):
+    __tablename__ = "orders"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    cart_id: Mapped[str] = mapped_column(ForeignKey("carts.id"))
+    slot_id: Mapped[str] = mapped_column(ForeignKey("delivery_slots.id"))
+    subtotal_cents: Mapped[int] = mapped_column(Integer)
+    delivery_fee_cents: Mapped[int] = mapped_column(Integer)
+    discount_cents: Mapped[int] = mapped_column(Integer)
+    total_cents: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String, default="confirmed")
+    # NEW (optional but recommended)
+    lat: Mapped[float] = mapped_column(Float, default=0.0)
+    lon: Mapped[float] = mapped_column(Float, default=0.0)
+
+class ScheduledStop(Base):
+    __tablename__ = "scheduled_stops"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    order_id: Mapped[str | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
+    lat: Mapped[float] = mapped_column(Float)
+    lon: Mapped[float] = mapped_column(Float)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String, default="scheduled")
+    weight: Mapped[float] = mapped_column(Float, default=1.0)
