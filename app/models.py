@@ -1,8 +1,16 @@
 from datetime import datetime, timedelta
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import Integer, String, Float, DateTime, ForeignKey, Boolean
+from sqlalchemy import JSON
 
 class Base(DeclarativeBase): pass
+
+
+class Setting(Base):
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSON)  # stores a JSON blob
 
 class Product(Base):
     __tablename__ = "products"

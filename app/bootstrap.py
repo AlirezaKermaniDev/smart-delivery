@@ -4,9 +4,37 @@ from .db import engine, db_session
 from .models import Base, Product, DeliverySlot
 from .config import settings
 from .util import gen_id
+from .models import Setting  # add to existing imports
+from .config import settings as cfg
 
 def create_schema():
     Base.metadata.create_all(bind=engine)
+
+def seed_settings():
+    """Ensure we have one global settings row with defaults."""
+    with db_session() as db:
+        existing = db.get(Setting, "global")
+        if existing:
+            return
+
+        default = {
+            "baseDeliveryFeeCents": cfg.BASE_DELIVERY_FEE_CENTS,
+            "minDeliveryFeeCents": cfg.MIN_DELIVERY_FEE_CENTS,
+            "maxDiscount": cfg.MAX_DISCOUNT,
+            "k": cfg.K,
+            "radiusM": cfg.RADIUS_M,
+            "t0Min": cfg.T0_MIN,
+            "minSoloUnits": cfg.MIN_SOLO_UNITS,
+            "availability": [
+                {
+                    # default: Monday–Friday, 13:00–17:00
+                    "daysOfWeek": [1, 2, 3, 4, 5],
+                    "startTime": "13:00",
+                    "endTime": "17:00",
+                }
+            ],
+        }
+        db.add(Setting(key="global", value=default))
 
 def seed_products():
     with db_session() as db:
@@ -38,3 +66,4 @@ def bootstrap():
     create_schema()
     seed_products()
     seed_slots()
+    seed_settings() 
