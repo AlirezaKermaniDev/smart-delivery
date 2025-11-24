@@ -16,7 +16,9 @@
 * {
   box-sizing: border-box;
 }
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
 }
@@ -24,7 +26,8 @@ body {
   background: radial-gradient(900px 700px at 10% -10%, #1e293b, transparent),
     radial-gradient(900px 700px at 110% 110%, #0f172a, transparent), var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    sans-serif;
 }
 
 .admin-app {
@@ -40,7 +43,11 @@ body {
   padding: 12px 20px;
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(12px);
-  background: linear-gradient(90deg, rgba(15, 118, 110, 0.2), rgba(79, 70, 229, 0.5));
+  background: linear-gradient(
+    90deg,
+    rgba(15, 118, 110, 0.2),
+    rgba(79, 70, 229, 0.5)
+  );
   position: sticky;
   top: 0;
   z-index: 10;
@@ -86,7 +93,11 @@ body {
 }
 
 .panel {
-  background: linear-gradient(145deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.98));
+  background: linear-gradient(
+    145deg,
+    rgba(15, 23, 42, 0.96),
+    rgba(15, 23, 42, 0.98)
+  );
   border-radius: var(--radius);
   border: 1px solid var(--border);
   padding: 16px 16px 14px;
@@ -119,7 +130,8 @@ body {
   color: var(--muted);
 }
 .field input[type="number"],
-.time-row input[type="time"] {
+.time-row input[type="time"],
+.field select {
   background: #020617;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -128,7 +140,8 @@ body {
   font-size: 14px;
 }
 .field input[type="number"]:focus,
-.time-row input[type="time"]:focus {
+.time-row input[type="time"]:focus,
+.field select:focus {
   outline: 1px solid var(--accent);
 }
 

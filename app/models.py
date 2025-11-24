@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy import Integer, String, Float, DateTime, ForeignKey, Boolean
 from sqlalchemy import JSON
-
+from .util import gen_id 
 class Base(DeclarativeBase): pass
 
 
@@ -31,7 +31,7 @@ class DeliverySlot(Base):
 
 class Cart(Base):
     __tablename__ = "carts"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("c"))
     user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     items = relationship("CartItem", back_populates="cart", cascade="all, delete-orphan")
@@ -48,7 +48,7 @@ class CartItem(Base):
 
 class Quote(Base):
     __tablename__ = "quotes"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True,default=lambda: gen_id("q"))
     cart_id: Mapped[str] = mapped_column(ForeignKey("carts.id"))
     slot_id: Mapped[str] = mapped_column(ForeignKey("delivery_slots.id"))
     subtotal_cents: Mapped[int] = mapped_column(Integer)
@@ -62,7 +62,7 @@ class Quote(Base):
 
 class Order(Base):
     __tablename__ = "orders"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: gen_id("or"))
     user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     cart_id: Mapped[str] = mapped_column(ForeignKey("carts.id"))
     slot_id: Mapped[str] = mapped_column(ForeignKey("delivery_slots.id"))
@@ -77,7 +77,7 @@ class Order(Base):
 
 class ScheduledStop(Base):
     __tablename__ = "scheduled_stops"
-    id: Mapped[str] = mapped_column(String, primary_key=True)
+    id: Mapped[str] = mapped_column(String, primary_key=True,default=lambda: gen_id("st"))
     order_id: Mapped[str | None] = mapped_column(ForeignKey("orders.id"), nullable=True)
     lat: Mapped[float] = mapped_column(Float)
     lon: Mapped[float] = mapped_column(Float)

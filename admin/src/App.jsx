@@ -67,6 +67,9 @@ export default function App() {
     }
   }
 
+  function updateField(field, value) {
+    setSettings((prev) => ({ ...prev, [field]: value }));
+  }
 
   function updateNumber(field, value) {
     const num = value === "" ? "" : Number(value);
@@ -184,9 +187,26 @@ export default function App() {
                   onChange={(v) => updateNumber("minSoloUnits", v)}
                 />
               </div>
+
+              <div className="field" style={{ marginTop: 10 }}>
+                <label className="label">Delivery type</label>
+                <select
+                  value={settings.deliveryType || "motorcycle"}
+                  onChange={(e) => updateField("deliveryType", e.target.value)}
+                >
+                  <option value="motorcycle">Motorcycle</option>
+                  <option value="car">Car</option>
+                  <option value="bicycle">Bicycle</option>
+                </select>
+                <p className="hint small">
+                  Affects how strongly distance/time impact batching score. Car is more tolerant to
+                  distance, bicycle is more sensitive.
+                </p>
+              </div>
+
               <p className="hint">
-                These values directly affect the batching score and discounts. Changes apply immediately
-                to new slot calculations.
+                These values directly affect the batching score and discounts. Changes apply
+                immediately to new slot computations.
               </p>
             </section>
 
@@ -257,8 +277,8 @@ export default function App() {
                       </div>
                     </div>
                     <p className="hint small">
-                      Only slots whose <b>startAt</b> falls within these days + times will be offered
-                      to customers.
+                      Only slots whose <b>startAt</b> falls within these days + times will be
+                      offered to customers.
                     </p>
                   </div>
                 ))}

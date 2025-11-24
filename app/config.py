@@ -1,31 +1,32 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
-    # Scoring / discount params
-    D0_M: float = 800.0
-    T0_MIN: float = 30.0
-    RADIUS_M: float = 3000.0
-    K: float = 1.0
-    MAX_DISCOUNT: float = 0.20
-    S_MIN: float = 0.05
-    MIN_SOLO_UNITS: int = 6
-    NEAR_FULL_THRESHOLD: float = 0.8
-    CAPACITY_HALF_MULTIPLIER: float = 0.5
+    # Core DB
+    DATABASE_URL: str = "postgresql://smart:smart@db:5432/smart"
 
-    # Pricing
+    # Scoring / discounts
     BASE_DELIVERY_FEE_CENTS: int = 450
-    MIN_DELIVERY_FEE_CENTS: int = 300
+    MIN_DELIVERY_FEE_CENTS: int = 350
+    MAX_DISCOUNT: float = 0.20
+    K: float = 1.0  # curve parameter
+    RADIUS_M: int = 3000
+    T0_MIN: int = 30
+    MIN_SOLO_UNITS: int = 6
+    S_MIN: float = 0.05  # minimum score to be considered batchable
 
-    # Slots
-    SLOT_MINUTES: int = 30
-    SERVICE_START_HOUR: int = 10
-    SERVICE_END_HOUR: int = 20
-    HORIZON_DAYS: int = 7
+    # Delivery mode used by scoring (affects decay)
+    # Allowed: "car", "motorcycle", "bicycle"
+    DELIVERY_TYPE: str = "motorcycle"
 
-    # Database
-    DATABASE_URL: str = "postgresql://smart:smart@db:5432/smart"  # docker-compose default
+    # Routing
+    ROUTING_BASE_URL: str = "https://router.project-osrm.org"
+
+    # Optional: used for CORS / frontend
+    APP_DOMAIN: str | None = None
 
     class Config:
         env_file = ".env"
+
 
 settings = Settings()

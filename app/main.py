@@ -1,73 +1,128 @@
-# app/main.py
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
+
+import math
+from datetime import datetime, timedelta, timezone, time as dtime
 from typing import List
-from datetime import time as dtime
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, and_, func, delete, text
-import math
+from sqlalchemy import select, and_
+import httpx
+
 from .config import settings
-from .db import db_session, engine
-from .bootstrap import bootstrap, seed_products, seed_slots
-from .util import gen_id
+from .db import db_session
 from .models import (
     Product,
     Cart,
     CartItem,
     DeliverySlot,
-    ScheduledStop,
     Quote,
-    Setting
+    ScheduledStop,
+    Setting,
+    Order
 )
-from .schemas import (
-    CartCreateIn,
-    CartSummaryOut,
-    SlotsResponse,
-    SlotOut,
-    QuoteIn,
-    QuoteOut,
-    PaymentCreateIn,
-    PaymentCreateOut,
-    WebhookIn,
-    MockDataIn,
-    AppSettings,
-    AvailabilityWindow
-)
+from .bootstrap import bootstrap
 from .scoring import (
     score_slot,
     discount_from_score,
-    label_for_discount,
     clamp_fee,
     solo_minimum_required,
-    params_snapshot,
     haversine_m,
 )
-from .payments_stub import create_payment_intent, finalize_quote
+from .schemas import (
+    CreateCartRequest,
+    CreateCartResponse,
+    SlotsResponse,
+    SlotOut,
+    SlotCapacity,
+    QuoteIn,
+    QuoteOut,
+    QuoteAmounts,
+    PaymentCreateIn,
+    PaymentCreateOut,
+    WebhookPaymentIn,
+    AppSettings,
+    AvailabilityWindow,
+    RoutingEstimateResponse,
+    TravelDurations,
+)
+
+# Ensure schema + seed on startup import
+bootstrap()
+
+app = FastAPI(title="Smart Delivery API")
 
 
-app = FastAPI(title="Smart Delivery API", version="1.2")
+# ----------------------
+# CORS
+# ----------------------
+
+origins = ["*"]
+if settings.APP_DOMAIN:
+    origins = [f"https://{settings.APP_DOMAIN}", f"http://{settings.APP_DOMAIN}"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # open for test stage
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Create tables and seed products/slots on startup
-bootstrap()
+
+# ----------------------
+# Utility helpers
+# ----------------------
 
 
-# ---------- helpers ----------
+def parse_iso_z(s: str) -> datetime:
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def params_snapshot() -> dict:
+    return {
+        "baseDeliveryFeeCents": settings.BASE_DELIVERY_FEE_CENTS,
+        "minDeliveryFeeCents": settings.MIN_DELIVERY_FEE_CENTS,
+        "maxDiscount": settings.MAX_DISCOUNT,
+        "k": settings.K,
+        "radiusM": settings.RADIUS_M,
+        "t0Min": settings.T0_MIN,
+        "minSoloUnits": settings.MIN_SOLO_UNITS,
+        "deliveryType": getattr(settings, "DELIVERY_TYPE", "motorcycle"),
+    }
+
+
+def calc_cart_subtotal_cents_by_id(db, cart_id: str) -> int:
+    cart = db.get(Cart, cart_id)
+    if not cart:
+        raise HTTPException(404, detail="Cart not found")
+    subtotal = 0
+    for item in cart.items:
+        subtotal += item.qty * item.product.price_cents
+    return subtotal
+
+
+def cart_units_total_by_id(db, cart_id: str) -> int:
+    cart = db.get(Cart, cart_id)
+    if not cart:
+        raise HTTPException(404, detail="Cart not found")
+    total_units = 0
+    for item in cart.items:
+        total_units += item.qty * item.product.unit_factor
+    return total_units
+
+
+# ----------------------
+# Settings helpers
+# ----------------------
+
 
 def load_app_settings(db) -> AppSettings:
-    """Get current app settings (DB row or env defaults)."""
     rec = db.get(Setting, "global")
     if rec:
         return AppSettings(**rec.value)
 
-    # Fallback to env if row missing
+    # Fallback to env defaults if row missing
     return AppSettings(
         baseDeliveryFeeCents=settings.BASE_DELIVERY_FEE_CENTS,
         minDeliveryFeeCents=settings.MIN_DELIVERY_FEE_CENTS,
@@ -81,14 +136,11 @@ def load_app_settings(db) -> AppSettings:
                 daysOfWeek=[1, 2, 3, 4, 5], startTime="13:00", endTime="17:00"
             )
         ],
+        deliveryType="motorcycle",
     )
 
 
 def apply_settings_to_runtime(cfg_model: AppSettings):
-    """
-    Push DB settings into in-memory config so scoring functions
-    that read from `settings` stay in sync.
-    """
     settings.BASE_DELIVERY_FEE_CENTS = cfg_model.baseDeliveryFeeCents
     settings.MIN_DELIVERY_FEE_CENTS = cfg_model.minDeliveryFeeCents
     settings.MAX_DISCOUNT = cfg_model.maxDiscount
@@ -96,13 +148,10 @@ def apply_settings_to_runtime(cfg_model: AppSettings):
     settings.RADIUS_M = cfg_model.radiusM
     settings.T0_MIN = cfg_model.t0Min
     settings.MIN_SOLO_UNITS = cfg_model.minSoloUnits
+    settings.DELIVERY_TYPE = cfg_model.deliveryType
 
 
 def slot_allowed(start_at: datetime, cfg_model: AppSettings) -> bool:
-    """
-    Check if a slot start time falls into any configured availability window.
-    daysOfWeek uses ISO weekday (1=Mon ... 7=Sun).
-    """
     dow = start_at.isoweekday()
     t = start_at.time()
     for w in cfg_model.availability:
@@ -117,63 +166,74 @@ def slot_allowed(start_at: datetime, cfg_model: AppSettings) -> bool:
     return False
 
 
-def parse_iso_z(s: str) -> datetime:
-    """Parse ISO-8601 allowing 'Z' suffix; return timezone-aware UTC."""
-    if s.endswith("Z"):
-        s = s.replace("Z", "+00:00")
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+# ----------------------
+# Settings endpoints
+# ----------------------
 
 
-def calc_cart_subtotal_cents_by_id(cart_id: str) -> int:
-    """Compute subtotal (in cents) using a single DB session by cart_id."""
+@app.get("/settings", response_model=AppSettings)
+def get_app_settings():
     with db_session() as db:
-        q = (
-            select(func.coalesce(func.sum(Product.price_cents * CartItem.qty), 0))
-            .join(CartItem, CartItem.product_id == Product.id)
-            .where(CartItem.cart_id == cart_id)
-        )
-        return int(db.execute(q).scalar() or 0)
+        cfg_model = load_app_settings(db)
+        apply_settings_to_runtime(cfg_model)
+        return cfg_model
 
 
-def cart_units_total_by_id(cart_id: str) -> int:
-    """Sum of unit_factor * qty for solo-minimum rule, by cart_id."""
+@app.put("/settings", response_model=AppSettings)
+def update_app_settings(payload: AppSettings):
     with db_session() as db:
-        q = (
-            select(func.coalesce(func.sum(Product.unit_factor * CartItem.qty), 0))
-            .join(CartItem, CartItem.product_id == Product.id)
-            .where(CartItem.cart_id == cart_id)
-        )
-        return int(db.execute(q).scalar() or 0)
+        rec = db.get(Setting, "global")
+        if rec:
+            rec.value = payload.dict()
+        else:
+            rec = Setting(key="global", value=payload.dict())
+            db.add(rec)
+        db.flush()
+        apply_settings_to_runtime(payload)
+        return payload
 
 
-# ---------- endpoints ----------
+# ----------------------
+# Cart
+# ----------------------
 
-@app.post("/cart", response_model=CartSummaryOut)
-def create_cart(payload: CartCreateIn):
-    """
-    Create a cart with items and return a subtotal.
-    """
+
+@app.post("/cart", response_model=CreateCartResponse)
+def create_cart(body: CreateCartRequest):
+    if not body.items:
+        raise HTTPException(400, detail="Cart must have at least one item")
+
     with db_session() as db:
-        c = Cart(id=gen_id("c"), user_id=None)
-        db.add(c)
-        db.flush()  # ensure c.id is persisted
+        # validate products
+        product_ids = [i.productId for i in body.items]
+        products = {
+            p.id: p for p in db.execute(select(Product).where(Product.id.in_(product_ids))).scalars()
+        }
+        if len(products) != len(set(product_ids)):
+            raise HTTPException(400, detail="Unknown productId in items")
 
-        for i in payload.items:
-            if not db.get(Product, i.productId):
-                raise HTTPException(404, detail=f"Unknown product {i.productId}")
-            db.add(CartItem(cart_id=c.id, product_id=i.productId, qty=i.qty))
+        cart = Cart()
+        db.add(cart)
+        db.flush()
+
+        for item in body.items:
+            if item.qty <= 0:
+                continue
+            ci = CartItem(
+                cart_id=cart.id,
+                product_id=item.productId,
+                qty=item.qty,
+            )
+            db.add(ci)
 
         db.flush()
-        subtotal = calc_cart_subtotal_cents_by_id(c.id)
+        return CreateCartResponse(cartId=cart.id)
 
-        return CartSummaryOut(
-            cartId=c.id,
-            subtotalCents=subtotal,
-            items=payload.items,
-        )
+
+# ----------------------
+# Slot listing
+# ----------------------
+
 
 @app.get("/delivery/slots", response_model=SlotsResponse)
 def get_slots(
@@ -183,18 +243,13 @@ def get_slots(
     fromISO: str | None = Query(None),
     toISO: str | None = Query(None),
 ):
-    """
-    List candidate slots with dynamic discounts for a given user location (lat/lon),
-    filtered by configured availability windows.
-    """
     with db_session() as db:
         cart = db.get(Cart, cartId)
         if not cart:
             raise HTTPException(404, detail="Cart not found")
 
-        # Load current settings (including availability)
         cfg_model = load_app_settings(db)
-        apply_settings_to_runtime(cfg_model)  # keep global config in sync
+        apply_settings_to_runtime(cfg_model)
 
         now = datetime.now(timezone.utc)
         start_time = parse_iso_z(fromISO) if fromISO else now
@@ -217,7 +272,9 @@ def get_slots(
         slots = [s for s in slots if slot_allowed(s.start_at, cfg_model)]
 
         out: List[SlotOut] = []
+
         for s in sorted(slots, key=lambda x: x.start_at):
+            # neighbor time window around slot
             win_start = s.start_at - timedelta(minutes=settings.T0_MIN)
             win_end = s.end_at + timedelta(minutes=settings.T0_MIN)
 
@@ -234,7 +291,8 @@ def get_slots(
                 .all()
             )
             neighbors = [
-                n for n in neigh
+                n
+                for n in neigh
                 if haversine_m(lat, lon, n.lat, n.lon) <= settings.RADIUS_M
             ]
 
@@ -244,33 +302,46 @@ def get_slots(
                 cfg_model.baseDeliveryFeeCents, disc_pct
             )
             requires_solo = solo_minimum_required(score, len(neighbors))
-            label = label_for_discount(disc_pct)
+
+            if disc_pct >= settings.MAX_DISCOUNT * 0.7:
+                label = "Best deal"
+            elif disc_pct >= settings.MAX_DISCOUNT * 0.3:
+                label = "Good deal"
+            else:
+                label = "Standard"
 
             out.append(
                 SlotOut(
                     slotId=s.id,
-                    startAt=s.start_at,
-                    endAt=s.end_at,
+                    startAt=s.start_at.replace(tzinfo=timezone.utc),
+                    endAt=s.end_at.replace(tzinfo=timezone.utc),
                     baseDeliveryFeeCents=base_fee,
                     discountPct=round(disc_pct, 4),
                     discountCents=discount_cents,
                     finalDeliveryFeeCents=final_fee,
                     label=label,
-                    capacity={"total": s.capacity_total, "used": s.capacity_used},
+                    capacity=SlotCapacity(
+                        total=s.capacity_total, used=s.capacity_used
+                    ),
                     requiresSoloMinUnits=requires_solo,
                     soloMinUnits=cfg_model.minSoloUnits,
                 )
             )
 
-        return SlotsResponse(computedAt=now, params=params_snapshot(), slots=out)
+        return SlotsResponse(
+            computedAt=now,
+            params=params_snapshot(),
+            slots=out,
+        )
 
+
+# ----------------------
+# Checkout / Quote
+# ----------------------
 
 
 @app.post("/checkout/quote", response_model=QuoteOut)
 def checkout_quote(payload: QuoteIn):
-    """
-    Price a cart for a given slot and user coordinates; enforce solo-minimum if needed.
-    """
     with db_session() as db:
         cart = db.get(Cart, payload.cartId)
         slot = db.get(DeliverySlot, payload.slotId)
@@ -295,8 +366,10 @@ def checkout_quote(payload: QuoteIn):
             .all()
         )
         neighbors = [
-            n for n in neigh
-            if haversine_m(payload.lat, payload.lon, n.lat, n.lon) <= settings.RADIUS_M
+            n
+            for n in neigh
+            if haversine_m(payload.lat, payload.lon, n.lat, n.lon)
+            <= settings.RADIUS_M
         ]
 
         score = score_slot(payload.lat, payload.lon, slot, neighbors)
@@ -307,7 +380,7 @@ def checkout_quote(payload: QuoteIn):
 
         # enforce solo-minimum if applicable
         if solo_minimum_required(score, len(neighbors)):
-            units = cart_units_total_by_id(cart.id)
+            units = cart_units_total_by_id(db, cart.id)
             if units < cfg_model.minSoloUnits:
                 raise HTTPException(
                     status_code=400,
@@ -318,12 +391,10 @@ def checkout_quote(payload: QuoteIn):
                     },
                 )
 
-        subtotal = calc_cart_subtotal_cents_by_id(cart.id)
+        subtotal = calc_cart_subtotal_cents_by_id(db, cart.id)
         total = subtotal + final_fee
 
-        qid = gen_id("q")
         q = Quote(
-            id=qid,
             cart_id=cart.id,
             slot_id=slot.id,
             subtotal_cents=subtotal,
@@ -335,11 +406,12 @@ def checkout_quote(payload: QuoteIn):
             lon=payload.lon,
         )
         db.add(q)
+        db.flush()
 
         return QuoteOut(
             quoteId=q.id,
             lockedUntil=q.locked_until,
-            amounts=dict(
+            amounts=QuoteAmounts(
                 subtotalCents=subtotal,
                 deliveryFeeCents=final_fee,
                 discountCents=discount_cents,
@@ -348,143 +420,123 @@ def checkout_quote(payload: QuoteIn):
         )
 
 
+# ----------------------
+# Payments (stub)
+# ----------------------
+
 
 @app.post("/payments/create", response_model=PaymentCreateOut)
-def payments_create(payload: PaymentCreateIn):
-    """
-    Stub PSP: returns a fake clientSecret for the given quoteId.
-    """
-    secret = create_payment_intent(payload.quoteId)
-    return PaymentCreateOut(clientSecret=secret)
-
+def create_payment_intent(body: PaymentCreateIn):
+    # Stub implementation
+    return PaymentCreateOut(
+        paymentIntentId=f"pi_{body.quoteId}",
+        status="requires_confirmation",
+    )
 
 @app.post("/webhooks/payment")
-def webhook_payment(payload: WebhookIn):
-    """
-    PSP webhook: on success, finalize the quote, create Order and a ScheduledStop.
-    """
-    if payload.event == "payment_succeeded":
-        finalize_quote(payload.quoteId)
-        return {"status": "ok"}
-    return {"status": "ignored"}
-
-
-@app.post("/dev/mock-data")
-def create_mock_data(in_: MockDataIn):
-    """
-    Create synthetic scheduled stops near a center point to test discounts/batching.
-    density: low ≈10, medium ≈25, high ≈60
-    """
-    from math import cos, pi
+def payment_webhook(body: WebhookPaymentIn):
+    if body.event != "payment_succeeded":
+        return {"status": "ignored"}
 
     with db_session() as db:
-        created = []
-        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        target = {"low": 10, "medium": 25, "high": 60}.get(in_.density, 25)
+        q = db.get(Quote, body.quoteId)
+        if not q:
+            raise HTTPException(404, detail="Quote not found")
 
-        for i in range(target):
-            minutes_ahead = (i * 20) % (12 * 60)  # spread across ~12h
-            when = now + timedelta(minutes=minutes_ahead)
+        slot = db.get(DeliverySlot, q.slot_id)
+        if not slot:
+            raise HTTPException(404, detail="Slot not found for quote")
 
-            # jitter ~2km
-            dlat = (0.018 * (i % 5 - 2) / 2.0)
-            dlon = (0.036 * (i % 7 - 3) / 2.0) * cos(in_.centerLat * pi / 180.0)
-
-            s = ScheduledStop(
-                id=gen_id("st"),
-                order_id=None,
-                lat=in_.centerLat + dlat,
-                lon=in_.centerLon + dlon,
-                scheduled_at=when,
-                status="scheduled",
-                weight=1.0,
+        # Either find an existing order for this cart+slot, or create a new one
+        order = (
+            db.execute(
+                select(Order).where(
+                    Order.cart_id == q.cart_id,
+                    Order.slot_id == q.slot_id,
+                )
             )
-            db.add(s)
-            created.append(s.id)
+            .scalars()
+            .first()
+        )
 
-        return {"createdStops": created, "count": len(created)}
+        if not order:
+            order = Order(
+                # id will be generated by default = gen_id("or")
+                user_id=None,  # or set a real user id if you have it
+                cart_id=q.cart_id,
+                slot_id=q.slot_id,
+                subtotal_cents=q.subtotal_cents,
+                delivery_fee_cents=q.delivery_fee_cents,
+                discount_cents=q.discount_cents,
+                total_cents=q.total_cents,
+                status="confirmed",
+                lat=q.lat,
+                lon=q.lon,
+            )
+            db.add(order)
+            db.flush()  # ensure order.id is available for FK
+
+        # Now create the scheduled stop, linked to the *order* id
+        stop = ScheduledStop(
+            order_id=order.id,
+            lat=q.lat,
+            lon=q.lon,
+            scheduled_at=slot.start_at,
+        )
+        db.add(stop)
+
+        # bump slot used capacity
+        slot.capacity_used = min(
+            slot.capacity_total,
+            (slot.capacity_used or 0) + 1,
+        )
+
+    return {"status": "ok"}
+
+
+# ----------------------
+# Dev endpoints
+# ----------------------
 
 
 @app.post("/dev/clear-db")
-def clear_db(full: bool = Query(False, description="If true, also clears & reseeds slots (products are kept).")):
+def dev_clear_db(full: bool = Query(False)):
     """
-    DEV-ONLY: Clear database data without any token (test stage).
-      - soft (default): clears carts, cart_items, quotes, orders, scheduled_stops; resets slot capacity_used.
-      - full=true: ALSO clears delivery_slots and then reseeds slots. Products are KEPT.
+    Clear runtime data for testing.
+    full=true: clear everything except products.
     """
-    # ---- Phase 1: do the TRUNCATE in its own transaction (no nested sessions) ----
-    try:
-        with engine.begin() as conn:
-            if full:
-                # Keep products; drop & reseed only slots and dynamic data
-                conn.execute(text("""
-                    TRUNCATE TABLE
-                        scheduled_stops,
-                        orders,
-                        quotes,
-                        cart_items,
-                        carts,
-                        delivery_slots
-                    RESTART IDENTITY CASCADE;
-                """))
-            else:
-                # Soft wipe: keep products & slots; just clear dynamic data and reset capacity
-                conn.execute(text("""
-                    TRUNCATE TABLE
-                        scheduled_stops,
-                        orders,
-                        quotes,
-                        cart_items,
-                        carts
-                    RESTART IDENTITY CASCADE;
-                """))
-                conn.execute(text("UPDATE delivery_slots SET capacity_used = 0;"))
-    except Exception:
-        # Portable fallback (e.g., SQLite)
-        with db_session() as db:
-            db.execute(delete(ScheduledStop))
-            db.execute(delete(Quote))
-            db.execute(delete(CartItem))
-            db.execute(delete(Cart))
-            if full:
-                db.execute(delete(DeliverySlot))
-            else:
-                db.execute(text("UPDATE delivery_slots SET capacity_used = 0;"))
+    with db_session() as db:
+        # Clear dynamic tables
+        db.query(ScheduledStop).delete()
+        db.query(Quote).delete()
+        db.query(CartItem).delete()
+        db.query(Cart).delete()
 
-    # ---- Phase 2: reseed (outside the TRUNCATE transaction to avoid locks) ----
-    if full:
-        # Keep products, only reseed slots
-        seed_slots()
-        return {
-            "status": "ok",
-            "mode": "full",
-            "wiped": ["delivery_slots", "carts", "cart_items", "quotes", "orders", "scheduled_stops"],
-            "products": "kept",
-            "slots": "reseeded",
-            "reseeded": True,
-        }
-    else:
-        return {
-            "status": "ok",
-            "mode": "soft",
-            "wiped": ["carts", "cart_items", "quotes", "orders", "scheduled_stops"],
-            "products": "kept",
-            "slots": "kept (capacity_used reset)",
-            "reseeded": False,
-        }
+        if full:
+            db.query(DeliverySlot).delete()
+            db.query(Setting).delete()
+    # Re-seed slots & settings
+    bootstrap()
+    return {"status": "ok", "full": full}
 
-# Debug: inspect neighbors & score for a specific slot / location
+
 @app.get("/dev/debug-neighbors")
-def debug_neighbors(slotId: str, lat: float, lon: float):
-    from sqlalchemy import and_
-    now = datetime.now(timezone.utc)
+def debug_neighbors(
+    slotId: str,
+    lat: float,
+    lon: float,
+):
     with db_session() as db:
         slot = db.get(DeliverySlot, slotId)
         if not slot:
-            raise HTTPException(404, "slot not found")
+            raise HTTPException(404, detail="slot not found")
+
+        cfg_model = load_app_settings(db)
+        apply_settings_to_runtime(cfg_model)
 
         win_start = slot.start_at - timedelta(minutes=settings.T0_MIN)
         win_end = slot.end_at + timedelta(minutes=settings.T0_MIN)
+
         neigh = (
             db.execute(
                 select(ScheduledStop).where(
@@ -493,57 +545,98 @@ def debug_neighbors(slotId: str, lat: float, lon: float):
                         ScheduledStop.scheduled_at <= win_end,
                     )
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
+        )
+        neighbors = [
+            n
+            for n in neigh
+            if haversine_m(lat, lon, n.lat, n.lon) <= settings.RADIUS_M
+        ]
+
+        score = score_slot(lat, lon, slot, neighbors)
+        disc_pct = discount_from_score(score)
+        final_fee, discount_cents, base_fee = clamp_fee(
+            cfg_model.baseDeliveryFeeCents, disc_pct
         )
 
-        # Keep only within radius
-        within = []
-        for n in neigh:
-            d = haversine_m(lat, lon, n.lat, n.lon)
-            if d <= settings.RADIUS_M:
-                within.append({"id": n.id, "dist_m": round(d, 2), "when": n.scheduled_at.isoformat()})
-        score = score_slot(lat, lon, slot, [db.get(ScheduledStop, x["id"]) for x in within])
-
         return {
-            "slot": {"id": slot.id, "start_at": slot.start_at.isoformat()},
-            "t0_min": settings.T0_MIN,
-            "radius_m": settings.RADIUS_M,
-            "neighbors_in_time": len(neigh),
-            "neighbors_within_radius": within,
+            "slotId": slotId,
+            "neighborsCount": len(neighbors),
             "score": score,
-            "expected_discount_pct": round(settings.MAX_DISCOUNT * (1 - math.exp(-settings.K * score)), 6),
+            "discountPct": disc_pct,
+            "finalFeeCents": final_fee,
+            "discountCents": discount_cents,
+            "baseFeeCents": base_fee,
+            "deliveryType": getattr(settings, "DELIVERY_TYPE", "motorcycle"),
         }
 
-@app.get("/settings", response_model=AppSettings)
-def get_app_settings():
-    """
-    Retrieve current configuration:
-    - scoring constants
-    - solo min units
-    - availability windows (days + hours).
-    """
-    with db_session() as db:
-        cfg_model = load_app_settings(db)
-        # ensure the in-memory config reflects DB
-        apply_settings_to_runtime(cfg_model)
-        return cfg_model
+
+# ----------------------
+# Routing API (OSRM)
+# ----------------------
 
 
-@app.put("/settings", response_model=AppSettings)
-def update_app_settings(payload: AppSettings):
+class RoutingError(Exception):
+    pass
+
+
+async def call_osrm_route(profile: str, from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> tuple[float, float]:
+    base = settings.ROUTING_BASE_URL.rstrip("/")
+    url = (
+        f"{base}/route/v1/{profile}/"
+        f"{from_lon},{from_lat};{to_lon},{to_lat}"
+        "?overview=false&alternatives=false&steps=false"
+    )
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url)
+    if r.status_code != 200:
+        raise RoutingError(f"OSRM error: HTTP {r.status_code} - {r.text}")
+    data = r.json()
+    if data.get("code") != "Ok" or not data.get("routes"):
+        raise RoutingError(f"OSRM error: {data.get('message', 'no routes')}")
+    route = data["routes"][0]
+    return float(route["distance"]), float(route["duration"])
+
+
+@app.get("/routing/estimate", response_model=RoutingEstimateResponse)
+async def routing_estimate(
+    fromLat: float = Query(...),
+    fromLon: float = Query(...),
+    toLat: float = Query(...),
+    toLon: float = Query(...),
+):
     """
-    Replace global settings with the provided payload.
-    This immediately affects:
-      - scoring constants (via in-memory config)
-      - slot availability filtering.
+    OSRM-based distance + duration for car/motorcycle/bicycle.
+    Motorcycle currently approximated from car.
     """
-    with db_session() as db:
-        rec = db.get(Setting, "global")
-        if rec:
-            rec.value = payload.dict()
-        else:
-            rec = Setting(key="global", value=payload.dict())
-            db.add(rec)
-        db.flush()
-        apply_settings_to_runtime(payload)
-        return payload
+    # car
+    dist_car, dur_car = await call_osrm_route(
+        "driving", fromLat, fromLon, toLat, toLon
+    )
+
+    # bike
+    try:
+        dist_bike, dur_bike = await call_osrm_route(
+            "cycling", fromLat, fromLon, toLat, toLon
+        )
+    except RoutingError:
+        dist_bike, dur_bike = dist_car, dur_car * 2.5
+
+    # motorcycle as faster car
+    dist_moto, dur_moto = dist_car, dur_car * 0.8
+
+    return RoutingEstimateResponse(
+        fromLat=fromLat,
+        fromLon=fromLon,
+        toLat=toLat,
+        toLon=toLon,
+        distanceMeters=dist_car,
+        durationsSeconds=TravelDurations(
+            car=dur_car,
+            motorcycle=dur_moto,
+            bicycle=dur_bike,
+        ),
+        provider="osrm",
+    )

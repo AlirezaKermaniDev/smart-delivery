@@ -1,20 +1,33 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import List, Optional
-from pydantic import BaseModel
-from typing import List
+from typing import List, Dict, Literal
+
 from pydantic import BaseModel, Field
+
+
+# ----------------------
+# Core cart / slot / quote
+# ----------------------
+
 
 class CartItemIn(BaseModel):
     productId: str
-    qty: int
+    qty: int = Field(..., ge=1)
 
-class CartCreateIn(BaseModel):
+
+class CreateCartRequest(BaseModel):
     items: List[CartItemIn]
 
-class CartSummaryOut(BaseModel):
+
+class CreateCartResponse(BaseModel):
     cartId: str
-    subtotalCents: int
-    items: List[CartItemIn]
+
+
+class SlotCapacity(BaseModel):
+    total: int
+    used: int
+
 
 class SlotOut(BaseModel):
     slotId: str
@@ -25,14 +38,16 @@ class SlotOut(BaseModel):
     discountCents: int
     finalDeliveryFeeCents: int
     label: str
-    capacity: dict
+    capacity: SlotCapacity
     requiresSoloMinUnits: bool
     soloMinUnits: int
 
+
 class SlotsResponse(BaseModel):
     computedAt: datetime
-    params: dict
+    params: Dict[str, float | int | str]
     slots: List[SlotOut]
+
 
 class QuoteIn(BaseModel):
     cartId: str
@@ -40,34 +55,43 @@ class QuoteIn(BaseModel):
     lat: float
     lon: float
 
+
+class QuoteAmounts(BaseModel):
+    subtotalCents: int
+    deliveryFeeCents: int
+    discountCents: int
+    totalCents: int
+
+
 class QuoteOut(BaseModel):
     quoteId: str
     lockedUntil: datetime
-    amounts: dict
+    amounts: QuoteAmounts
+
 
 class PaymentCreateIn(BaseModel):
     quoteId: str
 
-class PaymentCreateOut(BaseModel):
-    clientSecret: str
-    paymentProvider: str = "stub-pay"
 
-class WebhookIn(BaseModel):
+class PaymentCreateOut(BaseModel):
+    paymentIntentId: str
+    status: str
+
+
+class WebhookPaymentIn(BaseModel):
     event: str
     quoteId: str
-    intentId: Optional[str] = None
 
-class MockDataIn(BaseModel):
-    centerLat: float
-    centerLon: float
-    days: int = 1
-    density: str = "medium"  # low/medium/high
-    
+
+# ----------------------
+# Settings & availability
+# ----------------------
+
+
 class AvailabilityWindow(BaseModel):
     daysOfWeek: List[int] = Field(
-        ..., description="List of ISO weekdays (1=Mon ... 7=Sun)"
+        ..., description="ISO weekdays, 1=Mon..7=Sun"
     )
-    # HH:MM 24h strings – easier to store in JSON
     startTime: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     endTime: str = Field(..., pattern=r"^\d{2}:\d{2}$")
 
@@ -81,3 +105,25 @@ class AppSettings(BaseModel):
     t0Min: int
     minSoloUnits: int
     availability: List[AvailabilityWindow]
+    deliveryType: Literal["car", "motorcycle", "bicycle"] = "motorcycle"
+
+
+# ----------------------
+# Routing
+# ----------------------
+
+
+class TravelDurations(BaseModel):
+    car: float
+    motorcycle: float
+    bicycle: float
+
+
+class RoutingEstimateResponse(BaseModel):
+    fromLat: float
+    fromLon: float
+    toLat: float
+    toLon: float
+    distanceMeters: float
+    durationsSeconds: TravelDurations
+    provider: str
