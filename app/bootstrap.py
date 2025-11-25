@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, time as dtime
 
-from .db import engine, db_session          # engine + session from db.py
-from .models import Base, Product, DeliverySlot, Setting  # Base from models
+from .db import engine, db_session
+from .models import Base, Product, DeliverySlot, Setting
 from .config import settings as cfg
 
 
@@ -16,48 +16,35 @@ def seed_products():
             return
 
         products = [
-            Product(
-                id="p_1",
-                name="Classic Cookie",
-                price_cents=300,
-                unit_factor=1,
-            ),
-            Product(
-                id="p_2",
-                name="Double Choc",
-                price_cents=350,
-                unit_factor=1,
-            ),
-            Product(
-                id="p_3",
-                name="Party Box (6)",
-                price_cents=1600,
-                unit_factor=6,
-            ),
+            Product(id="p_1", name="Classic Cookie", price_cents=300, unit_factor=1),
+            Product(id="p_2", name="Double Choc", price_cents=350, unit_factor=1),
+            Product(id="p_3", name="Party Box (6)", price_cents=1600, unit_factor=6),
         ]
         db.add_all(products)
 
 
 def seed_slots():
     """
-    Very simple seeding of delivery slots for the next 3 days.
-    Actual business availability is enforced by settings.availability.
+    Ensure we always have delivery slots for the next N days.
     """
-    with db_session() as db:
-        count = db.query(DeliverySlot).count()
-        if count > 0:
-            return
+    days_ahead = 3
 
-        now = datetime.utcnow()
-        days = 3
-        for i in range(days):
-            day = now.date() + timedelta(days=i)
-            # create slots every hour from 12–20 as an example
-            for hour in range(12, 20):
+    with db_session() as db:
+        today = datetime.utcnow().date()
+
+        for i in range(days_ahead):
+            day = today + timedelta(days=i)
+            for hour in range(12, 20):  # 12:00–20:00
+                slot_id = f"sl_{day.strftime('%Y%m%d')}_{hour}"
+                existing = db.get(DeliverySlot, slot_id)
+                if existing:
+                    continue
+
                 start = datetime.combine(day, dtime(hour, 0))
-                end = start + timedelta(minutes=60)
+                end = start + timedelta(hours=1)
+
                 slot = DeliverySlot(
-                    id=f"sl_{day.strftime('%Y%m%d')}_{hour}",
+                    id=slot_id,
                     start_at=start,
                     end_at=end,
                     capacity_total=10,
@@ -67,9 +54,6 @@ def seed_slots():
 
 
 def seed_settings():
-    """
-    Seed a single global settings row if not present.
-    """
     with db_session() as db:
         existing = db.get(Setting, "global")
         if existing:
