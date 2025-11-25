@@ -500,24 +500,30 @@ def payment_webhook(body: WebhookPaymentIn):
 
 
 @app.post("/dev/clear-db")
-def dev_clear_db(full: bool = Query(False)):
+def dev_clear_db(full: bool = False):
     """
-    Clear runtime data for testing.
-    full=true: clear everything except products.
+    Development helper: clear runtime data.
+
+    - Always clears: scheduled_stops, quotes, orders, cart_items, carts.
+    - Never clears: products.
+    - If full=True: also resets delivery slot capacity_used to 0
+      (but keeps the slots themselves).
     """
     with db_session() as db:
-        # Clear dynamic tables
-        db.query(ScheduledStop).delete()
-        db.query(Quote).delete()
-        db.query(CartItem).delete()
+        # Delete in foreign-key-safe order
+        db.query(ScheduledStop).delete()  # FK -> orders.id
+        db.query(Quote).delete()          # FK -> carts.id, delivery_slots.id
+        db.query(Order).delete()          # FK -> carts.id
+        db.query(CartItem).delete()       # FK -> carts.id
         db.query(Cart).delete()
 
         if full:
-            db.query(DeliverySlot).delete()
-            db.query(Setting).delete()
-    # Re-seed slots & settings
-    bootstrap()
-    return {"status": "ok", "full": full}
+            # Do NOT delete products (per requirement).
+            # Just reset slot utilization so scoring starts fresh.
+            db.query(DeliverySlot).update({DeliverySlot.capacity_used: 0})
+
+        return {"status": "ok"}
+
 
 
 @app.get("/dev/debug-neighbors")
